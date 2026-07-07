@@ -395,6 +395,10 @@ impl AppState {
         self.onboarding_modal_inner(56, 7)
     }
 
+    pub(super) fn rename_modal_input_rect(&self, inner: Rect) -> Rect {
+        Rect::new(inner.x, inner.y + 2, inner.width, 1)
+    }
+
     fn release_notes_body_rect(&self) -> Option<Rect> {
         let inner = self.release_notes_modal_inner()?;
         if inner.height < 8 || inner.width < 4 {

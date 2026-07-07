@@ -388,22 +388,35 @@ impl AppState {
                     self.mode,
                     Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
                 ) {
-                    let action = self
-                        .rename_modal_inner()
-                        .map(crate::ui::rename_button_rects)
-                        .and_then(|(save, clear, cancel)| {
-                            modal_action_from_buttons(
-                                mouse.column,
-                                mouse.row,
-                                &[
-                                    (save, ModalAction::Save),
-                                    (clear, ModalAction::Clear),
-                                    (cancel, ModalAction::Cancel),
-                                ],
-                            )
-                        })
-                        .unwrap_or(ModalAction::Cancel);
-                    return Some(MouseAction::RenameModal(action));
+                    let Some(inner) = self.rename_modal_inner() else {
+                        return None;
+                    };
+                    let (save, clear, cancel) = crate::ui::rename_button_rects(inner);
+
+                    if let Some(action) = modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[
+                            (save, ModalAction::Save),
+                            (clear, ModalAction::Clear),
+                            (cancel, ModalAction::Cancel),
+                        ],
+                    ) {
+                        return Some(MouseAction::RenameModal(action));
+                    }
+
+                    let input_rect = self.rename_modal_input_rect(inner);
+                    if mouse.row == input_rect.y
+                        && mouse.column >= input_rect.x
+                        && mouse.column < input_rect.x + input_rect.width
+                    {
+                        self.name_input_replace_on_type = false;
+                        self.name_input_cursor =
+                            cursor_from_mouse_column(&self.name_input, input_rect.x, mouse.column);
+                        return None;
+                    }
+
+                    return Some(MouseAction::RenameModal(ModalAction::Cancel));
                 }
 
                 if self.mode == Mode::ContextMenu {
@@ -1827,6 +1840,29 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y + rect.height
 }
 
+fn cursor_from_mouse_column(name_input: &str, input_x: u16, mouse_col: u16) -> usize {
+    let click_col = mouse_col.saturating_sub(input_x + 1);
+    if click_col == 0 {
+        return 0;
+    }
+    let total_width = crate::ui::display_width(name_input) as u16;
+    if click_col >= total_width {
+        return name_input.chars().count();
+    }
+    let mut col = 0u16;
+    for (i, ch) in name_input.chars().enumerate() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if col + w > click_col {
+            return i;
+        }
+        col += w;
+        if col >= click_col {
+            return i + 1;
+        }
+    }
+    name_input.chars().count()
+}
+
 fn apply_scroll(scroll: &mut usize, delta: i16, max_scroll: usize) {
     if delta.is_negative() {
         *scroll = scroll.saturating_sub(delta.unsigned_abs() as usize);
@@ -2509,6 +2545,122 @@ mod tests {
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceRenamed)
         }));
+    }
+
+    #[test]
+    fn clicking_rename_input_repositions_cursor() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input = "hello".into();
+        app.state.name_input_cursor = 0;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.rename_modal_inner().unwrap();
+        let input_rect = app.state.rename_modal_input_rect(inner);
+        let text_start_x = input_rect.x + 1;
+
+        // Click on the leading space before text -> cursor at 0
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input_rect.x,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 0);
+
+        // Click at start of text -> cursor at 0
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 0);
+
+        // Click on the second character position -> cursor after 'h'
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x + 1,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 1);
+
+        // Click at third character position -> cursor after 'e'
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x + 2,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 2);
+
+        // Click past the end -> cursor at end
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x + 10,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 5);
+
+        // Click on the save button still works (input click returns None,
+        // but button clicks happen first)
+        let (save, _, _) = crate::ui::rename_button_rects(inner);
+        // Enter some text first so save has content
+        app.state.name_input_cursor = 0;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            save.x,
+            save.y,
+        ));
+        assert_eq!(app.state.workspaces[0].custom_name.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn clicking_rename_input_with_unicode_repositions_cursor() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input = "piñata".into();
+        app.state.name_input_cursor = 0;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.rename_modal_inner().unwrap();
+        let input_rect = app.state.rename_modal_input_rect(inner);
+        let text_start_x = input_rect.x + 1;
+
+        // 'ñ' is width 1 in most terminals, so clicking at +3 should be after 3 chars
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x + 3,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 3);
+
+        // End of 6-char string
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start_x + 6,
+            input_rect.y,
+        ));
+        assert_eq!(app.state.name_input_cursor, 6);
+    }
+
+    #[test]
+    fn clicking_rename_cancel_works_for_non_input_non_button_clicks() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("old")];
+        app.state.mode = Mode::RenameWorkspace;
+        app.state.name_input = "hello".into();
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        let inner = app.state.rename_modal_inner().unwrap();
+        let input_rect = app.state.rename_modal_input_rect(inner);
+
+        // Click above the input row (e.g. on the header row)
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input_rect.x,
+            input_rect.y.saturating_sub(1),
+        ));
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]

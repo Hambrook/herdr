@@ -306,6 +306,7 @@ pub(super) fn open_rename_workspace(
     state.rename_pane_target = None;
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
+    state.name_input_cursor = state.name_input.chars().count();
     state.name_input_replace_on_type = false;
     state.mode = Mode::RenameWorkspace;
 }
@@ -317,6 +318,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
+            state.name_input_cursor = state.name_input.chars().count();
             state.name_input_replace_on_type = replace_on_type;
             state.mode = Mode::RenameTab;
         }
@@ -337,6 +339,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
+    state.name_input_cursor = state.name_input.chars().count();
     state.name_input_replace_on_type = terminal.and_then(|t| t.manual_label.as_ref()).is_none();
     state.mode = Mode::RenamePane;
 }
@@ -354,6 +357,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
+    state.name_input_cursor = state.name_input.chars().count();
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
 }
@@ -489,11 +493,13 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.rename_pane_target = None;
             state.name_input.clear();
+            state.name_input_cursor = 0;
             state.name_input_replace_on_type = false;
             leave_modal(state);
         }
         ModalAction::Clear => {
             state.name_input.clear();
+            state.name_input_cursor = 0;
             state.name_input_replace_on_type = false;
         }
         ModalAction::Cancel => {
@@ -501,6 +507,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.requested_new_tab_name = None;
             state.rename_pane_target = None;
             state.name_input.clear();
+            state.name_input_cursor = 0;
             state.name_input_replace_on_type = false;
             leave_modal(state);
         }
@@ -510,21 +517,124 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
 
 fn clear_rename_input(state: &mut AppState) {
     state.name_input.clear();
+    state.name_input_cursor = 0;
     state.name_input_replace_on_type = false;
+}
+
+fn rename_input_char_count(state: &AppState) -> usize {
+    state.name_input.chars().count()
+}
+
+fn rename_cursor_byte_index(state: &AppState) -> usize {
+    if state.name_input_cursor == 0 {
+        return 0;
+    }
+    state
+        .name_input
+        .char_indices()
+        .nth(state.name_input_cursor)
+        .map(|(idx, _)| idx)
+        .unwrap_or(state.name_input.len())
+}
+
+fn move_rename_cursor_left(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    state.name_input_cursor = state.name_input_cursor.saturating_sub(1);
+}
+
+fn move_rename_cursor_left_word(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    let chars: Vec<char> = state.name_input.chars().collect();
+    let mut cursor = state.name_input_cursor;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    if cursor > 0 {
+        let is_alphanumeric = chars[cursor - 1].is_alphanumeric();
+        while cursor > 0 && chars[cursor - 1].is_alphanumeric() == is_alphanumeric && !chars[cursor - 1].is_whitespace() {
+            cursor -= 1;
+        }
+    }
+    state.name_input_cursor = cursor;
+}
+
+fn move_rename_cursor_to_start(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    state.name_input_cursor = 0;
+}
+
+fn move_rename_cursor_right(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    state.name_input_cursor =
+        (state.name_input_cursor + 1).min(rename_input_char_count(state));
+}
+
+fn move_rename_cursor_right_word(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    let chars: Vec<char> = state.name_input.chars().collect();
+    let len = chars.len();
+    let mut cursor = state.name_input_cursor;
+    while cursor < len && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if cursor < len {
+        let is_alphanumeric = chars[cursor].is_alphanumeric();
+        while cursor < len && chars[cursor].is_alphanumeric() == is_alphanumeric && !chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    }
+    state.name_input_cursor = cursor;
+}
+
+fn move_rename_cursor_to_end(state: &mut AppState) {
+    state.name_input_replace_on_type = false;
+    state.name_input_cursor = rename_input_char_count(state);
 }
 
 pub(crate) fn insert_rename_input_text(state: &mut AppState, text: &str) {
     if state.name_input_replace_on_type {
         clear_rename_input(state);
     }
-    state.name_input.push_str(text);
+    let insert_at = rename_cursor_byte_index(state);
+    state.name_input.insert_str(insert_at, text);
+    state.name_input_cursor += text.chars().count();
+}
+
+// "delete" is already used for deleting left (instead of backspace)
+fn deleteright_rename_input_char(state: &mut AppState) {
+    if state.name_input_replace_on_type {
+        clear_rename_input(state);
+    } else {
+        if state.name_input_cursor == rename_input_char_count(state) {
+            return;
+        }
+        let start = rename_cursor_byte_index(state);
+        let end = state
+            .name_input
+            .char_indices()
+            .nth(state.name_input_cursor.saturating_add(1))
+            .map(|(idx, _)| idx)
+            .unwrap_or(state.name_input.len());
+        state.name_input.replace_range(start..end, "");
+    }
 }
 
 fn delete_rename_input_char(state: &mut AppState) {
     if state.name_input_replace_on_type {
         clear_rename_input(state);
     } else {
-        state.name_input.pop();
+        if state.name_input_cursor == 0 {
+            return;
+        }
+        let end = rename_cursor_byte_index(state);
+        let start = state
+            .name_input
+            .char_indices()
+            .nth(state.name_input_cursor.saturating_sub(1))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        state.name_input.replace_range(start..end, "");
+        state.name_input_cursor = state.name_input_cursor.saturating_sub(1);
     }
 }
 
@@ -548,32 +658,79 @@ fn delete_rename_input_word(state: &mut AppState) {
         return;
     }
 
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(char::is_whitespace)
-    {
-        state.name_input.pop();
+    if state.name_input_cursor == 0 {
+        return;
     }
 
-    let Some(class) = state
-        .name_input
-        .chars()
-        .last()
-        .map(rename_word_delete_class)
+    let mut chars: Vec<char> = state.name_input.chars().collect();
+    let mut cursor = state.name_input_cursor.min(chars.len());
+
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        chars.remove(cursor - 1);
+        cursor -= 1;
+    }
+
+    let Some(class) = chars.get(cursor.saturating_sub(1)).copied().map(rename_word_delete_class)
     else {
         return;
     };
 
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(|ch| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
-    {
-        state.name_input.pop();
+    while cursor > 0 {
+        let ch = chars[cursor - 1];
+        if ch.is_whitespace() || rename_word_delete_class(ch) != class {
+            break;
+        }
+        chars.remove(cursor - 1);
+        cursor -= 1;
     }
+
+    state.name_input = chars.into_iter().collect();
+    state.name_input_cursor = cursor;
+}
+
+fn deleteright_rename_input_word(state: &mut AppState) {
+    if state.name_input_replace_on_type {
+        clear_rename_input(state);
+        return;
+    }
+
+    let mut chars: Vec<char> = state.name_input.chars().collect();
+    let original_cursor_pos = state.name_input_cursor.min(chars.len());
+
+    if original_cursor_pos == chars.len() { // Nothing to delete to the right
+        return;
+    }
+
+    // Delete leading whitespace to the right of the cursor
+    let current_deletion_idx = original_cursor_pos;
+    while current_deletion_idx < chars.len() && chars[current_deletion_idx].is_whitespace() {
+        chars.remove(current_deletion_idx);
+    }
+
+    // If after deleting whitespace, we are at the end, nothing left to delete
+    if current_deletion_idx == chars.len() {
+        state.name_input = chars.into_iter().collect();
+        return;
+    }
+
+    // Determine the class of the word at the cursor
+    let Some(class) = chars.get(current_deletion_idx).copied().map(rename_word_delete_class)
+    else {
+        state.name_input = chars.into_iter().collect();
+        return;
+    };
+
+    // Delete the word to the right
+    while current_deletion_idx < chars.len() {
+        let ch = chars[current_deletion_idx];
+        if ch.is_whitespace() || rename_word_delete_class(ch) != class {
+            break;
+        }
+        chars.remove(current_deletion_idx);
+    }
+
+    state.name_input = chars.into_iter().collect();
+    state.name_input_cursor = original_cursor_pos;
 }
 
 fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
@@ -590,10 +747,37 @@ fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
         {
             delete_rename_input_word(state);
         }
+        KeyCode::Delete
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            deleteright_rename_input_word(state);
+        }
         KeyCode::Char('h' | 'w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             delete_rename_input_word(state);
         }
+        KeyCode::Home | KeyCode::Up if key.modifiers.is_empty() => {
+            move_rename_cursor_to_start(state);
+        }
+        KeyCode::End | KeyCode::Down if key.modifiers.is_empty() => {
+            move_rename_cursor_to_end(state);
+        }
+        KeyCode::Left
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            move_rename_cursor_left_word(state);
+        }
+        KeyCode::Right
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            move_rename_cursor_right_word(state);
+        }
+        KeyCode::Left if key.modifiers.is_empty() => move_rename_cursor_left(state),
+        KeyCode::Right if key.modifiers.is_empty() => move_rename_cursor_right(state),
         KeyCode::Backspace => delete_rename_input_char(state),
+        KeyCode::Delete => deleteright_rename_input_char(state),
         KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             insert_rename_input_text(state, &c.to_string());
         }
@@ -1328,6 +1512,12 @@ mod tests {
         });
     }
 
+    fn set_rename_input(state: &mut AppState, text: &str) {
+        state.name_input = text.into();
+        state.name_input_cursor = state.name_input.chars().count();
+        state.name_input_replace_on_type = false;
+    }
+
     #[test]
     fn custom_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
@@ -1428,7 +1618,7 @@ mod tests {
     fn rename_modal_keyboard_and_mouse_share_actions() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameWorkspace;
-        state.name_input = "hello".into();
+        set_rename_input(&mut state, "hello");
 
         handle_rename_key(
             &mut state,
@@ -1436,7 +1626,7 @@ mod tests {
         );
         assert!(state.name_input.is_empty());
 
-        state.name_input = "renamed".into();
+        set_rename_input(&mut state, "renamed");
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
@@ -1452,7 +1642,7 @@ mod tests {
         state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
         state.view.terminal_area = Rect::new(26, 0, 80, 20);
         state.mode = Mode::RenameWorkspace;
-        state.name_input = "mouse".into();
+        set_rename_input(&mut state, "mouse");
         let inner = state.rename_modal_inner().unwrap();
         let (save, _, _) = crate::ui::rename_button_rects(inner);
         let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
@@ -1463,7 +1653,7 @@ mod tests {
     fn tab_rename_updates_captured_snapshot() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
-        state.name_input = "logs".into();
+        set_rename_input(&mut state, "logs");
 
         handle_rename_key(
             &mut state,
@@ -1481,7 +1671,7 @@ mod tests {
     fn rename_cancel_returns_to_terminal_when_workspace_is_active() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
-        state.name_input = "test".into();
+        set_rename_input(&mut state, "test");
 
         handle_rename_key(
             &mut state,
@@ -1496,7 +1686,7 @@ mod tests {
     fn rename_modal_replaces_prefilled_text_on_first_type() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
-        state.name_input = "2".into();
+        set_rename_input(&mut state, "2");
         state.name_input_replace_on_type = true;
 
         handle_rename_key(
@@ -1517,7 +1707,7 @@ mod tests {
     fn rename_modal_replaces_prefilled_text_on_paste() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameTab;
-        state.name_input = "2".into();
+        set_rename_input(&mut state, "2");
         state.name_input_replace_on_type = true;
 
         insert_rename_input_text(&mut state, "feature/logs");
@@ -1534,7 +1724,7 @@ mod tests {
     fn rename_modal_handles_line_editing_shortcuts() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::RenameWorkspace;
-        state.name_input = "website zero".into();
+        set_rename_input(&mut state, "website zero");
 
         handle_rename_key(
             &mut state,
@@ -1548,14 +1738,14 @@ mod tests {
         );
         assert_eq!(state.name_input, "website ");
 
-        state.name_input = "website-zero".into();
+        set_rename_input(&mut state, "website-zero");
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
         );
         assert_eq!(state.name_input, "website-");
 
-        state.name_input = "website-zero".into();
+        set_rename_input(&mut state, "website zero");
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
@@ -1600,6 +1790,250 @@ mod tests {
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
         assert_eq!(state.name_input, "websiteZ");
+    }
+
+    #[test]
+    fn rename_modal_left_right_moves_cursor_for_mid_string_edits() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "alpha omega");
+
+        for _ in 0..6 {
+            handle_rename_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            );
+        }
+        assert_eq!(state.name_input_cursor, 5);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('-'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "alpha- omega");
+        assert_eq!(state.name_input_cursor, 6);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.name_input, "alpha-omega");
+        assert_eq!(state.name_input_cursor, 6);
+    }
+
+    #[test]
+    fn rename_modal_cursor_navigation_is_unicode_safe() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "piñata");
+
+        for _ in 0..3 {
+            handle_rename_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            );
+        }
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('-'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.name_input, "piñ-ata");
+        assert_eq!(state.name_input_cursor, 4);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.name_input, "piñata");
+        assert_eq!(state.name_input_cursor, 3);
+    }
+
+    #[test]
+    fn rename_modal_home_up_and_end_down_jump_to_input_edges() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "alpha");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input_cursor, 0);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(state.name_input, ">alpha");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::End, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input_cursor, state.name_input.chars().count());
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(state.name_input, ">alpha<");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input_cursor, 0);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input_cursor, state.name_input.chars().count());
+    }
+
+    #[test]
+    fn deleteright_removes_char_after_cursor() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "hello");
+
+        // Delete at end -> no change, cursor stays at end
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "hello");
+        assert_eq!(state.name_input_cursor, 5);
+
+        // Move to start, then Delete removes first char
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "ello");
+        assert_eq!(state.name_input_cursor, 0);
+
+        // Move cursor to position 2, Delete removes char at position 2
+        for _ in 0..2 {
+            handle_rename_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            );
+        }
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "elo");
+        assert_eq!(state.name_input_cursor, 2);
+    }
+
+    #[test]
+    fn deleteright_is_unicode_safe() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "piñata");
+
+        // Cursor at 0, delete removes 'p'
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "iñata");
+        assert_eq!(state.name_input_cursor, 0);
+
+        // Move to after 'i' (cursor 1), delete removes 2-byte 'ñ'
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "iata");
+        assert_eq!(state.name_input_cursor, 1);
+    }
+
+    #[test]
+    fn deleteright_with_replace_on_type_clears_input() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "hello");
+        state.name_input_replace_on_type = true;
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert!(state.name_input.is_empty());
+        assert_eq!(state.name_input_cursor, 0);
+        assert!(!state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn deleteright_at_start_removes_first_char() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        set_rename_input(&mut state, "hello");
+
+        // Cursor already at 0 from set_rename_input (cursor at end),
+        // so move to start first
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input_cursor, 0);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "ello");
+        assert_eq!(state.name_input_cursor, 0);
+
+        // Delete twice more -> "lo"
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "lo");
+        assert_eq!(state.name_input_cursor, 0);
+
+        // Delete to empty
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert!(state.name_input.is_empty());
+        assert_eq!(state.name_input_cursor, 0);
+
+        // Delete on empty input does nothing
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::empty()),
+        );
+        assert!(state.name_input.is_empty());
+        assert_eq!(state.name_input_cursor, 0);
     }
 
     #[test]
@@ -1763,8 +2197,7 @@ mod tests {
     fn saving_new_tab_dialog_requests_creation_with_name() {
         let mut state = state_with_workspaces(&["test"]);
         open_new_tab_dialog(&mut state);
-        state.name_input = "logs".into();
-        state.name_input_replace_on_type = false;
+        set_rename_input(&mut state, "logs");
 
         handle_rename_key(
             &mut state,

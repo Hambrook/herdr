@@ -70,8 +70,11 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
 
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
     frame.render_widget(Clear, input_rect);
+    let cursor = app.name_input_cursor.min(app.name_input.chars().count());
+    let before: String = app.name_input.chars().take(cursor).collect();
+    let after: String = app.name_input.chars().skip(cursor).collect();
     frame.render_widget(
-        Paragraph::new(format!(" {}█", app.name_input)).style(
+        Paragraph::new(format!(" {}█{}", before, after)).style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),

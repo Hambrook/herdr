@@ -19,6 +19,7 @@ mod sidebar;
 mod status;
 mod tabs;
 mod text;
+pub(crate) use self::text::display_width;
 mod widgets;
 
 use self::dialogs::{
